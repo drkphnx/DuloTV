@@ -11,6 +11,7 @@
         android:label="Dulo TV"
         android:icon="@mipmap/ic_launcher"
         android:banner="@drawable/tv_banner">
+        <activity android:name=".PlayerActivity" android:screenOrientation="landscape" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|smallestScreenSize|uiMode"

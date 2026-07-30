@@ -5,13 +5,15 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.content.Intent;
+import android.net.Uri;
+import android.webkit.WebResourceResponse;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
-import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -29,6 +31,8 @@ public class MainActivity extends Activity {
     private FrameLayout splash;
     private View customView;
     private WebChromeClient.CustomViewCallback customViewCallback;
+    private volatile String lastMediaUrl;
+    private volatile boolean nativePlayerLaunching;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -104,7 +108,7 @@ public class MainActivity extends Activity {
                 progress.setVisibility(View.GONE);
                 injectPerformanceMode();
                 injectPopupBlocker();
-                injectPlaybackLowMemoryMode();
+                injectNavigationHintBlocker();
                 injectTvNavigation();
                 splash.setVisibility(View.GONE);
                 v.requestFocus();
@@ -118,6 +122,15 @@ public class MainActivity extends Activity {
                 return true;
             }
 
+            @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                String u = r.getUrl().toString();
+                if (isPlayableMediaUrl(u)) {
+                    lastMediaUrl = u;
+                    // Give the page a moment to finish the user-initiated Play action, then move playback native.
+                    v.postDelayed(() -> launchNativePlayerIfReady(), 250);
+                }
+                return super.shouldInterceptRequest(v, r);
+            }
             @Override public void onReceivedError(WebView v, WebResourceRequest r, android.webkit.WebResourceError e) {
                 if (r.isForMainFrame()) {
                     progress.setVisibility(View.GONE);
@@ -127,20 +140,6 @@ public class MainActivity extends Activity {
                     error.setFocusable(true);
                     error.requestFocus();
                 }
-            }
-
-            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                // Do not let an old/low-memory WebView renderer take the whole Activity with it.
-                if (webView != null) {
-                    root.removeView(webView);
-                    webView.destroy();
-                    webView = null;
-                }
-                error.setText("Dulo TV ran out of video memory.\n\nPress OK to restart.");
-                error.setVisibility(View.VISIBLE);
-                error.setFocusable(true);
-                error.requestFocus();
-                return true;
             }
         });
 
@@ -185,7 +184,7 @@ public class MainActivity extends Activity {
             "html{scroll-behavior:auto!important}" +
             "';document.head.appendChild(s);" +
             "function tune(){document.querySelectorAll('img').forEach(function(i){i.loading='lazy';i.decoding='async';});}" +
-            "tune();window.__duloPerfObserver=new MutationObserver(tune);window.__duloPerfObserver.observe(document.documentElement,{childList:true,subtree:true});" +
+            "tune();new MutationObserver(tune).observe(document.documentElement,{childList:true,subtree:true});" +
             "})();";
         js(js);
     }
@@ -209,64 +208,64 @@ public class MainActivity extends Activity {
             "document.documentElement.style.overflow='auto';document.body.style.overflow='auto';" +
             "document.body.style.pointerEvents='auto';" +
             "}" +
-            "kill();window.__duloPopupObserver=new MutationObserver(kill);window.__duloPopupObserver.observe(document.documentElement,{childList:true,subtree:true});" +
+            "kill();new MutationObserver(kill).observe(document.documentElement,{childList:true,subtree:true});" +
             "})();";
         js(js);
     }
 
-    /**
-     * Ultra-low-memory playback mode for 1 GB TV sticks.
-     * It activates only after a video starts playing, so normal browsing stays intact.
-     * During playback it stops our DOM observers, unloads poster/background images,
-     * removes navigation-hint overlays, and reduces compositing work behind the player.
-     */
-    private void injectPlaybackLowMemoryMode() {
-        String js = "(function(){" +
-            "if(window.__duloPlaybackLiteInstalled)return;window.__duloPlaybackLiteInstalled=true;" +
-            "var active=false;" +
-            "function text(e){return((e.innerText||e.textContent||'')+'').toLowerCase();}" +
-            "function killHints(){" +
-              "Array.prototype.slice.call(document.querySelectorAll('body *')).forEach(function(e){" +
-                "var t=text(e);if(!t||t.length>700)return;" +
-                "var hint=(t.indexOf('navigation')>=0&&(t.indexOf('hint')>=0||t.indexOf('arrow')>=0||t.indexOf('remote')>=0||t.indexOf('control')>=0))||" +
-                         "(t.indexOf('use arrow')>=0)||(t.indexOf('use the arrow')>=0)||(t.indexOf('navigation hints')>=0);" +
-                "if(!hint)return;var x=e;for(var i=0;i<5&&x&&x!==document.body;i++,x=x.parentElement){" +
-                  "var s=getComputedStyle(x);if(s.position==='fixed'||s.position==='absolute'||x.getAttribute('role')==='dialog'){x.remove();break;}" +
-                "}" +
-              "});" +
-            "}" +
-            "function enter(v){if(active)return;active=true;window.__duloPlaybackLite=true;" +
-              "killHints();" +
-              "try{if(window.__duloPerfObserver)window.__duloPerfObserver.disconnect();}catch(e){}" +
-              "try{if(window.__duloPopupObserver)window.__duloPopupObserver.disconnect();}catch(e){}" +
-              "document.querySelectorAll('img').forEach(function(i){" +
-                "if(v&&v.contains&&v.contains(i))return;i.removeAttribute('srcset');i.removeAttribute('sizes');" +
-                "i.setAttribute('data-dulo-old-src',i.getAttribute('src')||'');i.removeAttribute('src');" +
-              "});" +
-              "document.querySelectorAll('video').forEach(function(x){if(x!==v){try{x.pause();x.removeAttribute('src');x.load();}catch(e){}}});" +
-              "var st=document.getElementById('dulo-playback-lite');if(!st){st=document.createElement('style');st.id='dulo-playback-lite';" +
-                "st.textContent='body.__dulo_playing *{animation:none!important;transition:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;box-shadow:none!important;text-shadow:none!important;filter:none!important}'+" +
-                "'body.__dulo_playing img{visibility:hidden!important} body.__dulo_playing video{visibility:visible!important;opacity:1!important;filter:none!important}';document.head.appendChild(st);}" +
-              "document.body.classList.add('__dulo_playing');" +
-            "}" +
-            "function leave(){if(!active)return;active=false;window.__duloPlaybackLite=false;document.body.classList.remove('__dulo_playing');}" +
-            "function bind(){document.querySelectorAll('video').forEach(function(v){if(v.__duloLiteBound)return;v.__duloLiteBound=true;" +
-              "v.addEventListener('playing',function(){enter(v);},{passive:true});" +
-              "v.addEventListener('play',function(){enter(v);},{passive:true});" +
-              "v.addEventListener('ended',leave,{passive:true});" +
-            "});killHints();}" +
-            "bind();window.__duloVideoBinder=new MutationObserver(bind);window.__duloVideoBinder.observe(document.documentElement,{childList:true,subtree:true});" +
-            "})();";
-        js(js);
+    /** Removes the one-time player/remote navigation help overlay without touching the player itself. */
+    private void injectNavigationHintBlocker() {
+        String code = "(function(){if(window.__duloHintBlocker)return;window.__duloHintBlocker=true;" +
+            "function kill(){Array.prototype.slice.call(document.querySelectorAll('body *')).forEach(function(e){" +
+            "var t=((e.innerText||e.textContent||'')+'').trim().toLowerCase();if(!t||t.length>500)return;" +
+            "var hit=t.indexOf('navigation hints')>=0||t.indexOf('use arrow')>=0||t.indexOf('use the arrow')>=0||" +
+            "(t.indexOf('remote')>=0&&t.indexOf('navigation')>=0);if(!hit)return;" +
+            "var x=e;for(var i=0;i<5&&x&&x!==document.body;i++,x=x.parentElement){var st=getComputedStyle(x);" +
+            "if(st.position==='fixed'||x.getAttribute('role')==='dialog'){x.remove();break;}}});}" +
+            "kill();new MutationObserver(kill).observe(document.documentElement,{childList:true,subtree:true});})();";
+        js(code);
+    }
+
+    private boolean isPlayableMediaUrl(String u) {
+        if (u == null) return false;
+        String x = u.toLowerCase();
+        // Conservative on purpose: only hand obvious direct manifests/files to Media3.
+        return x.contains(".m3u8") || x.contains(".mpd") || x.matches(".*\\.(mp4|m4v|webm)(\\?.*)?$");
+    }
+
+    private void launchNativePlayerIfReady() {
+        if (nativePlayerLaunching || lastMediaUrl == null || webView == null || isFinishing()) return;
+        nativePlayerLaunching = true;
+        String url = lastMediaUrl;
+        String page = webView.getUrl();
+        String ua = webView.getSettings().getUserAgentString();
+        String cookie = CookieManager.getInstance().getCookie(url);
+        Intent i = new Intent(this, PlayerActivity.class);
+        i.putExtra(PlayerActivity.EXTRA_URL, url);
+        i.putExtra(PlayerActivity.EXTRA_REFERER, page == null ? HOME : page);
+        i.putExtra(PlayerActivity.EXTRA_UA, ua);
+        i.putExtra(PlayerActivity.EXTRA_COOKIE, cookie);
+        // Pause Chromium while native playback owns the screen. This is the RAM-saving part.
+        webView.onPause();
+        webView.pauseTimers();
+        startActivity(i);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.resumeTimers();
+            webView.onResume();
+        }
+        nativePlayerLaunching = false;
+        lastMediaUrl = null;
+        immersive();
     }
 
     private void injectTvNavigation() {
         String js = "(function(){if(window.__duloTv)return;window.__duloTv=true;" +
           "var style=document.createElement('style');style.innerHTML='.__dulo_focus{outline:4px solid #fff!important;outline-offset:3px!important;z-index:2147483646!important}';document.head.appendChild(style);"+
-          "function isMenuToggle(e){var tag=(e.tagName||'').toLowerCase(),label=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')+' '+(e.getAttribute('data-testid')||'')).toLowerCase(),hasPopup=(e.getAttribute('aria-haspopup')||'').toLowerCase(),expanded=e.hasAttribute('aria-expanded');if(hasPopup==='menu')return true;if(tag==='button'&&(expanded||label==='menu'||label.indexOf('open menu')>=0||label.indexOf('navigation menu')>=0||label.indexOf('toggle menu')>=0||label.indexOf('hamburger')>=0))return true;return false;}"+
-          "function els(){return Array.prototype.slice.call(document.querySelectorAll('a,button,input,select,textarea,[role=button],[tabindex],video')).filter(function(e){var r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!==\"hidden\"&&s.display!==\"none\"&&!e.disabled&&!isMenuToggle(e);});}"+
-          "document.addEventListener('keydown',function(ev){var k=ev.key||'';if(k==='ArrowUp'||k==='ArrowDown'||k==='ArrowLeft'||k==='ArrowRight'){ev.preventDefault();ev.stopImmediatePropagation();}},true);"+
-          "document.addEventListener('keyup',function(ev){var k=ev.key||'';if(k==='ArrowUp'||k==='ArrowDown'||k==='ArrowLeft'||k==='ArrowRight'){ev.preventDefault();ev.stopImmediatePropagation();}},true);"+
+          "function els(){return Array.prototype.slice.call(document.querySelectorAll('a,button,input,select,textarea,[role=button],[tabindex],video')).filter(function(e){var r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!==\"hidden\"&&s.display!==\"none\"&&!e.disabled;});}"+
           "function cur(){return document.querySelector('.__dulo_focus')||document.activeElement;}"+
           "function set(e){document.querySelectorAll('.__dulo_focus').forEach(function(x){x.classList.remove('__dulo_focus')});if(e){e.classList.add('__dulo_focus');try{e.focus({preventScroll:true})}catch(x){e.focus()}e.scrollIntoView({block:'center',inline:'center',behavior:'auto'});}}"+
           "function move(d){var a=els(),c=cur();if(!a.length)return;if(!c||a.indexOf(c)<0){set(a[0]);return;}var r=c.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2,b=null,bs=1e20;a.forEach(function(e){if(e===c)return;var q=e.getBoundingClientRect(),x=q.left+q.width/2,y=q.top+q.height/2,dx=x-cx,dy=y-cy,ok=(d==='l'&&dx< -3)||(d==='r'&&dx>3)||(d==='u'&&dy< -3)||(d==='d'&&dy>3);if(!ok)return;var main=(d==='l'||d==='r')?Math.abs(dx):Math.abs(dy),cross=(d==='l'||d==='r')?Math.abs(dy):Math.abs(dx),score=main+cross*2.2;if(score<bs){bs=score;b=e;}});if(b)set(b);}"+
@@ -284,7 +283,6 @@ public class MainActivity extends Activity {
 
         if (error.getVisibility() == View.VISIBLE && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER)) {
             error.setVisibility(View.GONE);
-            if (webView == null) { recreate(); return true; }
             splash.setVisibility(View.VISIBLE);
             webView.setVisibility(View.VISIBLE);
             webView.reload();
@@ -339,15 +337,6 @@ public class MainActivity extends Activity {
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) immersive();
-    }
-
-    @Override public void onTrimMemory(int level) {
-        super.onTrimMemory(level);
-        if (webView != null && level >= TRIM_MEMORY_RUNNING_LOW) {
-            // Drop disposable WebView cache and tell the page to shed decoded poster images.
-            webView.clearCache(false);
-            js("(function(){if(window.__duloPlaybackLite){document.querySelectorAll('img').forEach(function(i){i.removeAttribute('srcset');i.removeAttribute('src');});}})()");
-        }
     }
 
     @Override protected void onDestroy() {
